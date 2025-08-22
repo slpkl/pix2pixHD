@@ -407,6 +407,9 @@ class Vgg19(torch.nn.Module):
                 param.requires_grad = False
 
     def forward(self, X):
+        # vgg19 assumes 3 input channels.
+        if X.shape[1] == 1:
+            X = X.expand(-1, 3, -1, -1)
         h_relu1 = self.slice1(X)
         h_relu2 = self.slice2(h_relu1)        
         h_relu3 = self.slice3(h_relu2)        
