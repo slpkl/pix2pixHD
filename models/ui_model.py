@@ -1,5 +1,4 @@
 import torch
-from torch.autograd import Variable
 from collections import OrderedDict
 import numpy as np
 import os
@@ -62,9 +61,9 @@ class UIModel(BaseModel):
             inst_img = inst_img.resize((w, h), Image.NEAREST)            
             self.inst_map = self.toTensor(inst_img).cuda()
             self.edge_map = self.get_edges(self.inst_map)          
-            self.net_input = Variable(torch.cat((self.input_label, self.edge_map), dim=1), volatile=True)
+            self.net_input = torch.cat((self.input_label, self.edge_map), dim=1)
         else:
-            self.net_input = Variable(self.input_label, volatile=True)  
+            self.net_input = self.input_label
         
         self.features_clustered = np.load(feat_path).item()
         self.object_map = self.inst_map if opt.instance_feat else self.label_map 
@@ -214,11 +213,11 @@ class UIModel(BaseModel):
 
     def single_forward(self, net_input, feat_map):
         net_input = torch.cat((net_input, feat_map), dim=1)
-        fake_image = self.netG.forward(net_input)
-
+        with torch.no_grad():
+            fake_image = self.netG.forward(net_input)
         if fake_image.size()[0] == 1:
-            return fake_image.data[0]        
-        return fake_image.data
+            return fake_image[0]
+        return fake_image
 
 
     # generate all outputs for different styles
@@ -259,7 +258,7 @@ class UIModel(BaseModel):
                         for cluster_idx in range(self.opt.multiple_output):  
                             self.set_features(idx, self.feat, cluster_idx)
                             fake_image = self.single_forward(net_input, self.feat_map[:,:,y_region,x_region])                            
-                            fake_image = util.tensor2im(fake_image[:,min_y-y_start:max_y-y_start,min_x-x_start:max_x-x_start])
+                            fake_image = util.tensor2im(fake_image[:,min_y-y_start:max_y-y_start,min_x-x_start:max_x-x-start])
                             self.fake_image.append(fake_image)
                     else:
                         ### downsample
@@ -341,7 +340,7 @@ class UIModel(BaseModel):
         dict_list = [('fake_image', self.fake_image), ('mask', mask)]
 
         if getLabel: # only output label map if needed to save bandwidth
-            label = util.tensor2label(self.net_input.data[0], self.opt.label_nc)                    
+            label = util.tensor2label(self.net_input[0], self.opt.label_nc)                    
             dict_list += [('label', label)]
 
         return OrderedDict(dict_list)
