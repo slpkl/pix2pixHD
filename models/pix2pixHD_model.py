@@ -106,8 +106,9 @@ class Pix2PixHDModel(BaseModel):
             self.optimizer_G = torch.optim.Adam(params, lr=opt.lr, betas=(opt.beta1, 0.999))                            
 
             # optimizer D                        
-            params = list(self.netD.parameters())    
-            self.optimizer_D = torch.optim.Adam(params, lr=opt.lr, betas=(opt.beta1, 0.999))
+            params += list(self.netD.parameters())    
+            self.optimizer_all = torch.optim.AdamW(params, lr=opt.lr, betas=(opt.beta1, 0.999))
+            self.optimizer_D = torch.optim.Adam(list(self.netD.parameters()), lr=opt.lr, betas=(opt.beta1, 0.999))
 
     # def encode_input(self, label_map, inst_map=None, real_image=None, feat_map=None, infer=False):    
     def encode_input(self, label_map, inst_map=None, real_image=None, feat_map=None):         

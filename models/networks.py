@@ -95,6 +95,8 @@ class GANLoss(nn.Module):
             target_tensor = self.fake_label_var
         return target_tensor
 
+    def forward(self, input, target_is_real):
+        return self.__call__(input, target_is_real)
     def __call__(self, input, target_is_real):
         if isinstance(input[0], list):
             loss = 0
@@ -406,14 +408,14 @@ class Vgg19(torch.nn.Module):
 
     def forward(self, X):
         # vgg19 assumes 3 input channels.
-        if X.shape[1] == 1:
+        if len(X.shape)<3:
+            X = X.unsqueeze(0)
+        if X.shape[-3] == 1:
             X = X.expand(-1, 3, -1, -1)
         h_relu1 = self.slice1(X)
         h_relu2 = self.slice2(h_relu1)        
         h_relu3 = self.slice3(h_relu2)        
         h_relu4 = self.slice4(h_relu3)        
         h_relu5 = self.slice5(h_relu4)                
-        out = [h_relu1, h_relu2, h_relu3, h_relu4, h_relu5]
-        return out
         out = [h_relu1, h_relu2, h_relu3, h_relu4, h_relu5]
         return out

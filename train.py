@@ -15,7 +15,10 @@ from data.data_loader import CreateDataLoader
 from models.models import create_model
 import util.util as util
 from util.visualizer import Visualizer
-from torch.cuda.amp import autocast, GradScaler  # native AMP
+import accelerate
+from accelerate import Accelerator
+import torch
+
 
 opt = TrainOptions().parse()
 iter_path = os.path.join(opt.checkpoints_dir, opt.name, 'iter.txt')
@@ -44,11 +47,20 @@ print('#training images = %d' % dataset_size)
 model = create_model(opt)
 visualizer = Visualizer(opt)
 
-# Remove Apex; use native AMP scalers and fetch optimizers from the model/module
-scaler_G = GradScaler(enabled=opt.fp16)
-scaler_D = GradScaler(enabled=opt.fp16)
+
 optim_src = model.module if hasattr(model, 'module') else model
 optimizer_G, optimizer_D = optim_src.optimizer_G, optim_src.optimizer_D
+optimizer_all = optim_src.optimizer_all
+netE, netD = optim_src.netE, optim_src.netD
+accelerator = Accelerator()
+
+scheduler_all = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_all, factor=0.5, patience=3, cooldown=2)
+model, optimizer_all, dataset, scheduler_all = accelerator.prepare(
+    model, optimizer_all, dataset, scheduler_all
+)
+
+
+
 
 total_steps = (start_epoch-1) * dataset_size + epoch_iter
 
@@ -56,10 +68,13 @@ display_delta = total_steps % opt.display_freq
 print_delta = total_steps % opt.print_freq
 save_delta = total_steps % opt.save_latest_freq
 
+model.to(accelerator.device)
+
 for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
     epoch_start_time = time.time()
     if epoch != start_epoch:
         epoch_iter = epoch_iter % dataset_size
+    total_loss = 0
     for i, data in enumerate(dataset, start=epoch_iter):
         if total_steps % opt.print_freq == print_delta:
             iter_start_time = time.time()
@@ -69,8 +84,8 @@ for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
         # whether to collect output images
         save_fake = total_steps % opt.display_freq == display_delta
 
-        # Forward and loss computation under autocast
-        with autocast(enabled=opt.fp16):
+        # Forward and loss computation under accelerate 
+        with accelerator.accumulate(model):
             losses, generated = model(
                 data['label'],
                 data['inst'],
@@ -84,19 +99,16 @@ for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
             # calculate final loss scalars
             loss_D = (loss_dict['D_fake'] + loss_dict['D_real']) * 0.5
             loss_G = loss_dict['G_GAN'] + loss_dict.get('G_GAN_Feat',0) + loss_dict.get('G_VGG',0)
+            loss = loss_D+loss_G
+            ############### Backward Pass ####################
+            # update generator weights
+            optimizer_all.zero_grad()
+            accelerator.backward(loss)
+            optimizer_all.step()
+            if accelerator.sync_gradients:
+                accelerator.clip_grad_norm_(model.parameters(), 1.0)
+                total_loss += loss.detach().item()*data['label'].shape[0]
 
-        ############### Backward Pass ####################
-        # update generator weights
-        optimizer_G.zero_grad()
-        scaler_G.scale(loss_G).backward()
-        scaler_G.step(optimizer_G)
-        scaler_G.update()
-
-        # update discriminator weights
-        optimizer_D.zero_grad()
-        scaler_D.scale(loss_D).backward()
-        scaler_D.step(optimizer_D)
-        scaler_D.update()
 
         ############## Display results and errors ##########
         ### print out errors
@@ -122,9 +134,10 @@ for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
             model.module.save('latest')            
             np.savetxt(iter_path, (epoch, epoch_iter), delimiter=',', fmt='%d')
 
-        if epoch_iter >= dataset_size:
+        if epoch_iter >= dataset_size: # что это за ебаный пиздец.
             break
-       
+    
+    scheduler_all.step(total_loss)
     # end of epoch 
     iter_end_time = time.time()
     print('End of epoch %d / %d \t Time Taken: %d sec' %
@@ -140,7 +153,3 @@ for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
     ### instead of only training the local enhancer, train the entire network after certain iterations
     if (opt.niter_fix_global != 0) and (epoch == opt.niter_fix_global):
         model.module.update_fixed_params()
-
-    ### linearly decay learning rate after certain iterations
-    if epoch > opt.niter:
-        model.module.update_learning_rate()
