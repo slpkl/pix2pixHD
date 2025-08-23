@@ -18,7 +18,8 @@ class Pix2PixHDModel(BaseModel):
     
     def initialize(self, opt):
         BaseModel.initialize(self, opt)
-        if opt.resize_or_crop != 'none' or not opt.isTrain: # when training at full res this causes OOM
+        # Enable cudnn.benchmark only when CUDA/cuDNN is available
+        if (opt.resize_or_crop != 'none' or not opt.isTrain) and len(self.gpu_ids) and torch.backends.cudnn.is_available():
             torch.backends.cudnn.benchmark = True
         self.isTrain = opt.isTrain
         self.use_features = opt.instance_feat or opt.label_feat
@@ -111,19 +112,16 @@ class Pix2PixHDModel(BaseModel):
     # def encode_input(self, label_map, inst_map=None, real_image=None, feat_map=None, infer=False):    
     def encode_input(self, label_map, inst_map=None, real_image=None, feat_map=None):         
         if self.opt.label_nc == 0:
-            #input_label = label_map.data.cuda()
             input_label = label_map
         else:
             if len(self.gpu_ids):
                 label_map = label_map.cuda()
-            # create one-hot vector for label map
             size = label_map.size()
             oneHot_size = (size[0], self.opt.label_nc, size[2], size[3])
-            # input_label = torch.cuda.FloatTensor(torch.Size(oneHot_size)).zero_()
-            # input_label = input_label.scatter_(1, label_map.data.long().cuda(), 1.0)
             input_label = self.Tensor(torch.Size(oneHot_size)).zero_()
             input_label = input_label.scatter_(1, label_map.long(), 1.0)
-            if self.opt.data_type == 16:
+            # Only use half on GPU
+            if self.opt.data_type == 16 and len(self.gpu_ids):
                 input_label = input_label.half()
             if len(self.gpu_ids):
                 input_label = input_label.cuda()
@@ -153,6 +151,34 @@ class Pix2PixHDModel(BaseModel):
                 feat_map = feat_map.cuda()
             if self.opt.label_feat and len(self.gpu_ids):
                 inst_map = label_map.cuda()
+
+        return input_label, inst_map, real_image, feat_map
+    
+    def cpu_encode_input(self, label_map, inst_map=None, real_image=None, feat_map=None, infer=False):
+        if self.opt.label_nc == 0:
+            input_label = label_map.detach().cpu()
+        else:
+            size = label_map.size()
+            oneHot_size = (size[0], self.opt.label_nc, size[2], size[3])
+            input_label = torch.zeros(oneHot_size, dtype=torch.float32)
+            input_label = input_label.scatter_(1, label_map.detach().long().cpu(), 1.0)
+            # Do not use half on CPU
+            if self.opt.data_type == 16 and len(self.gpu_ids):
+                input_label = input_label.half()
+
+        if not self.opt.no_instance:
+            inst_map = inst_map.detach().cpu()
+            edge_map = self.get_edges(inst_map)
+            input_label = torch.cat((input_label, edge_map), dim=1)
+
+        if real_image is not None:
+            real_image = real_image.detach().cpu()
+
+        if self.use_features:
+            if self.opt.load_features and feat_map is not None:
+                feat_map = feat_map.detach().cpu()
+            if self.opt.label_feat:
+                inst_map = label_map.detach().cpu()
 
         return input_label, inst_map, real_image, feat_map
 
@@ -233,6 +259,27 @@ class Pix2PixHDModel(BaseModel):
         with torch.no_grad():
             fake_image = self.netG.forward(input_concat)
         return fake_image
+    
+    def cpu_inference(self, label, inst, image=None):
+        # Encode Inputs
+        image = image if image is not None else None
+        input_label, inst_map, real_image, _ = self.cpu_encode_input(label, inst, image, infer=True)
+
+        # Fake Generation
+        if self.use_features:
+            if self.opt.use_encoded_image:
+                # encode the real image to get feature map
+                feat_map = self.netE.forward(real_image, inst_map)
+            else:
+                # sample clusters from precomputed features
+                feat_map = self.sample_features(inst_map)
+            input_concat = torch.cat((input_label, feat_map), dim=1)
+        else:
+            input_concat = input_label
+
+        with torch.no_grad():
+            fake_image = self.netG.forward(input_concat)
+        return fake_image
 
     def sample_features(self, inst): 
         # read precomputed feature clusters 
@@ -284,16 +331,15 @@ class Pix2PixHDModel(BaseModel):
         return feature
 
     def get_edges(self, t):
-        # edge = torch.cuda.ByteTensor(t.size()).zero_()
-        edge = torch.ByteTensor(t.size())
-        if len(self.gpu_ids):
-            edge = edge.cuda()
-        edge = edge.zero_()
-        edge[:,:,:,1:] = edge[:,:,:,1:] | (t[:,:,:,1:] != t[:,:,:,:-1])
-        edge[:,:,:,:-1] = edge[:,:,:,:-1] | (t[:,:,:,1:] != t[:,:,:,:-1])
-        edge[:,:,1:,:] = edge[:,:,1:,:] | (t[:,:,1:,:] != t[:,:,:-1,:])
-        edge[:,:,:-1,:] = edge[:,:,:-1,:] | (t[:,:,1:,:] != t[:,:,:-1,:])
-        if self.opt.data_type==16:
+        # t: (N, C=1, H, W) integer tensor on CPU or GPU
+        device = t.device
+        edge = torch.zeros_like(t, dtype=torch.bool, device=device)
+        edge[:, :, :, 1:] |= (t[:, :, :, 1:] != t[:, :, :, :-1])
+        edge[:, :, :, :-1] |= (t[:, :, :, 1:] != t[:, :, :, :-1])
+        edge[:, :, 1:, :] |= (t[:, :, 1:, :] != t[:, :, :-1, :])
+        edge[:, :, :-1, :] |= (t[:, :, 1:, :] != t[:, :, :-1, :])
+        # Match training precision; avoid half on CPU
+        if self.opt.data_type == 16 and len(self.gpu_ids):
             return edge.half()
         else:
             return edge.float()
@@ -324,6 +370,18 @@ class Pix2PixHDModel(BaseModel):
             print('update learning rate: %f -> %f' % (self.old_lr, lr))
         self.old_lr = lr
 
+class InferenceModel(Pix2PixHDModel):
+    def forward(self, inp):
+        label, inst = inp
+        return self.inference(label, inst)
+        if self.opt.verbose:
+            print('update learning rate: %f -> %f' % (self.old_lr, lr))
+        self.old_lr = lr
+
+class InferenceModel(Pix2PixHDModel):
+    def forward(self, inp):
+        label, inst = inp
+        return self.inference(label, inst)
 class InferenceModel(Pix2PixHDModel):
     def forward(self, inp):
         label, inst = inp

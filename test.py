@@ -24,7 +24,8 @@ webpage = html.HTML(web_dir, 'Experiment = %s, Phase = %s, Epoch = %s' % (opt.na
 # test
 if not opt.engine and not opt.onnx:
     model = create_model(opt)
-    if opt.data_type == 16:
+    # Use half only on GPU
+    if opt.data_type == 16 and len(opt.gpu_ids) > 0:
         model.half()
     elif opt.data_type == 8:
         model.type(torch.uint8)
@@ -37,7 +38,8 @@ else:
 for i, data in enumerate(dataset):
     if i >= opt.how_many:
         break
-    if opt.data_type == 16:
+    # Use half only on GPU
+    if opt.data_type == 16 and len(opt.gpu_ids) > 0:
         data['label'] = data['label'].half()
         data['inst']  = data['inst'].half()
     elif opt.data_type == 8:
@@ -54,9 +56,13 @@ for i, data in enumerate(dataset):
         generated = run_trt_engine(opt.engine, minibatch, [data['label'], data['inst']])
     elif opt.onnx:
         generated = run_onnx(opt.onnx, opt.data_type, minibatch, [data['label'], data['inst']])
-    else:        
-        generated = model.inference(data['label'], data['inst'], data['image'])
-        
+    # else:        
+    #     generated = model.inference(data['label'], data['inst'], data['image'])
+    else:     
+        if opt.gpu_ids == []:
+            generated = model.cpu_inference(data['label'], data['inst'], data['image'])
+        else:
+            generated = model.inference(data['label'], data['inst'], data['image'])
     visuals = OrderedDict([('input_label', util.tensor2label(data['label'][0], opt.label_nc)),
                            ('synthesized_image', util.tensor2im(generated[0]))])
     img_path = data['path']
