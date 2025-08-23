@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import functools
-from torch.autograd import Variable
 import numpy as np
 
 ###############################################################################
@@ -80,20 +79,19 @@ class GANLoss(nn.Module):
             self.loss = nn.BCELoss()
 
     def get_target_tensor(self, input, target_is_real):
-        target_tensor = None
         if target_is_real:
-            create_label = ((self.real_label_var is None) or
-                            (self.real_label_var.numel() != input.numel()))
+            create_label = (self.real_label_var is None) or (self.real_label_var.numel() != input.numel())
             if create_label:
-                real_tensor = self.Tensor(input.size()).fill_(self.real_label)
-                self.real_label_var = Variable(real_tensor, requires_grad=False)
+                self.real_label_var = torch.full_like(
+                    input, fill_value=self.real_label, dtype=input.dtype, device=input.device
+                )
             target_tensor = self.real_label_var
         else:
-            create_label = ((self.fake_label_var is None) or
-                            (self.fake_label_var.numel() != input.numel()))
+            create_label = (self.fake_label_var is None) or (self.fake_label_var.numel() != input.numel())
             if create_label:
-                fake_tensor = self.Tensor(input.size()).fill_(self.fake_label)
-                self.fake_label_var = Variable(fake_tensor, requires_grad=False)
+                self.fake_label_var = torch.full_like(
+                    input, fill_value=self.fake_label, dtype=input.dtype, device=input.device
+                )
             target_tensor = self.fake_label_var
         return target_tensor
 
@@ -415,5 +413,7 @@ class Vgg19(torch.nn.Module):
         h_relu3 = self.slice3(h_relu2)        
         h_relu4 = self.slice4(h_relu3)        
         h_relu5 = self.slice5(h_relu4)                
+        out = [h_relu1, h_relu2, h_relu3, h_relu4, h_relu5]
+        return out
         out = [h_relu1, h_relu2, h_relu3, h_relu4, h_relu5]
         return out
