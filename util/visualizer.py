@@ -4,7 +4,7 @@ import ntpath
 import time
 from . import util
 from . import html
-import scipy.misc
+from PIL import Image
 try:
     from StringIO import StringIO  # Python 2.7
 except ImportError:
@@ -33,6 +33,25 @@ class Visualizer():
             now = time.strftime("%c")
             log_file.write('================ Training Loss (%s) ================\n' % now)
 
+    def _to_pil(self, img_np):
+        """
+        Convert a numpy image array to a PIL Image, handling dtype and shape safely.
+        Expects HxW, HxWx1, or HxWx3 with range [0,1] or [0,255].
+        """
+        if img_np is None:
+            return None
+        arr = np.array(img_np)
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255)
+            if arr.max() <= 1.0:
+                arr = arr * 255.0
+            arr = arr.astype(np.uint8)
+        if arr.ndim == 2:
+            return Image.fromarray(arr, mode='L')
+        if arr.ndim == 3 and arr.shape[2] == 1:
+            return Image.fromarray(arr[:, :, 0], mode='L')
+        return Image.fromarray(arr)
+
     # |visuals|: dictionary of images to display or save
     def display_current_results(self, visuals, epoch, step):
         if self.tf_log: # show images in tensorboard output
@@ -43,7 +62,8 @@ class Visualizer():
                     s = StringIO()
                 except:
                     s = BytesIO()
-                scipy.misc.toimage(image_numpy).save(s, format="jpeg")
+                img = self._to_pil(image_numpy)
+                img.save(s, format="jpeg")
                 # Create an Image object
                 img_sum = self.tf.Summary.Image(encoded_image_string=s.getvalue(), height=image_numpy.shape[0], width=image_numpy.shape[1])
                 # Create a Summary value
@@ -55,13 +75,14 @@ class Visualizer():
 
         if self.use_html: # save images to a html file
             for label, image_numpy in visuals.items():
+                img = self._to_pil(image_numpy)
                 if isinstance(image_numpy, list):
                     for i in range(len(image_numpy)):
                         img_path = os.path.join(self.img_dir, 'epoch%.3d_%s_%d.jpg' % (epoch, label, i))
-                        util.save_image(image_numpy[i], img_path)
+                        img.save(img_path)
                 else:
                     img_path = os.path.join(self.img_dir, 'epoch%.3d_%s.jpg' % (epoch, label))
-                    util.save_image(image_numpy, img_path)
+                    img.save(img_path)
 
             # update website
             webpage = html.HTML(self.web_dir, 'Experiment name = %s' % self.name, refresh=30)
@@ -72,6 +93,7 @@ class Visualizer():
                 links = []
 
                 for label, image_numpy in visuals.items():
+                    img = self._to_pil(image_numpy)
                     if isinstance(image_numpy, list):
                         for i in range(len(image_numpy)):
                             img_path = 'epoch%.3d_%s_%d.jpg' % (n, label, i)
