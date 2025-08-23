@@ -2,7 +2,6 @@ import time
 import os
 import numpy as np
 import torch
-from torch.autograd import Variable
 from collections import OrderedDict
 from subprocess import call
 # import fractions
@@ -70,8 +69,13 @@ for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
         save_fake = total_steps % opt.display_freq == display_delta
 
         ############## Forward Pass ######################
-        losses, generated = model(Variable(data['label']), Variable(data['inst']), 
-            Variable(data['image']), Variable(data['feat']), infer=save_fake)
+        losses, generated = model(
+            data['label'],
+            data['inst'],
+            data['image'],
+            data['feat'],
+            infer=save_fake
+        )
 
         # sum per device losses
         losses = [ torch.mean(x) if not isinstance(x, int) else x for x in losses ]
@@ -101,7 +105,7 @@ for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
         ############## Display results and errors ##########
         ### print out errors
         if total_steps % opt.print_freq == print_delta:
-            errors = {k: v.data.item() if not isinstance(v, int) else v for k, v in loss_dict.items()}            
+            errors = {k: (v.item() if torch.is_tensor(v) else v) for k, v in loss_dict.items()}
             t = (time.time() - iter_start_time) / opt.print_freq
             visualizer.print_current_errors(epoch, epoch_iter, errors, t)
             visualizer.plot_current_errors(errors, total_steps)
@@ -109,9 +113,11 @@ for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
 
         ### display output images
         if save_fake:
-            visuals = OrderedDict([('input_label', util.tensor2label(data['label'][0], opt.label_nc)),
-                                   ('synthesized_image', util.tensor2im(generated.data[0])),
-                                   ('real_image', util.tensor2im(data['image'][0]))])
+            visuals = OrderedDict([
+                ('input_label', util.tensor2label(data['label'][0], opt.label_nc)),
+                ('synthesized_image', util.tensor2im(generated[0].detach())),
+                ('real_image', util.tensor2im(data['image'][0]))
+            ])
             visualizer.display_current_results(visuals, epoch, total_steps)
 
         ### save latest model
