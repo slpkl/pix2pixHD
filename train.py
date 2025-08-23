@@ -15,6 +15,7 @@ from data.data_loader import CreateDataLoader
 from models.models import create_model
 import util.util as util
 from util.visualizer import Visualizer
+from torch.cuda.amp import autocast, GradScaler  # native AMP
 
 opt = TrainOptions().parse()
 iter_path = os.path.join(opt.checkpoints_dir, opt.name, 'iter.txt')
@@ -42,12 +43,12 @@ print('#training images = %d' % dataset_size)
 
 model = create_model(opt)
 visualizer = Visualizer(opt)
-if opt.fp16:    
-    from apex import amp
-    model, [optimizer_G, optimizer_D] = amp.initialize(model, [model.optimizer_G, model.optimizer_D], opt_level='O1')             
-    model = torch.nn.DataParallel(model, device_ids=opt.gpu_ids)
-else:
-    optimizer_G, optimizer_D = model.module.optimizer_G, model.module.optimizer_D
+
+# Remove Apex; use native AMP scalers and fetch optimizers from the model/module
+scaler_G = GradScaler(enabled=opt.fp16)
+scaler_D = GradScaler(enabled=opt.fp16)
+optim_src = model.module if hasattr(model, 'module') else model
+optimizer_G, optimizer_D = optim_src.optimizer_G, optim_src.optimizer_D
 
 total_steps = (start_epoch-1) * dataset_size + epoch_iter
 
@@ -68,39 +69,34 @@ for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
         # whether to collect output images
         save_fake = total_steps % opt.display_freq == display_delta
 
-        ############## Forward Pass ######################
-        losses, generated = model(
-            data['label'],
-            data['inst'],
-            data['image'],
-            data['feat'],
-            infer=save_fake
-        )
-
-        # sum per device losses
-        losses = [ torch.mean(x) if not isinstance(x, int) else x for x in losses ]
-        loss_dict = dict(zip(model.module.loss_names, losses))
-
-        # calculate final loss scalar
-        loss_D = (loss_dict['D_fake'] + loss_dict['D_real']) * 0.5
-        loss_G = loss_dict['G_GAN'] + loss_dict.get('G_GAN_Feat',0) + loss_dict.get('G_VGG',0)
+        # Forward and loss computation under autocast
+        with autocast(enabled=opt.fp16):
+            losses, generated = model(
+                data['label'],
+                data['inst'],
+                data['image'],
+                data['feat'],
+                infer=save_fake
+            )
+            # sum per device losses
+            losses = [ torch.mean(x) if not isinstance(x, int) else x for x in losses ]
+            loss_dict = dict(zip(model.module.loss_names, losses))
+            # calculate final loss scalars
+            loss_D = (loss_dict['D_fake'] + loss_dict['D_real']) * 0.5
+            loss_G = loss_dict['G_GAN'] + loss_dict.get('G_GAN_Feat',0) + loss_dict.get('G_VGG',0)
 
         ############### Backward Pass ####################
         # update generator weights
         optimizer_G.zero_grad()
-        if opt.fp16:                                
-            with amp.scale_loss(loss_G, optimizer_G) as scaled_loss: scaled_loss.backward()                
-        else:
-            loss_G.backward()          
-        optimizer_G.step()
+        scaler_G.scale(loss_G).backward()
+        scaler_G.step(optimizer_G)
+        scaler_G.update()
 
         # update discriminator weights
         optimizer_D.zero_grad()
-        if opt.fp16:                                
-            with amp.scale_loss(loss_D, optimizer_D) as scaled_loss: scaled_loss.backward()                
-        else:
-            loss_D.backward()        
-        optimizer_D.step()        
+        scaler_D.scale(loss_D).backward()
+        scaler_D.step(optimizer_D)
+        scaler_D.update()
 
         ############## Display results and errors ##########
         ### print out errors
